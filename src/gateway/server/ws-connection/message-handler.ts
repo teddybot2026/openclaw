@@ -469,6 +469,7 @@ export function attachGatewayWsMessageHandler(params: {
 
         const isControlUi = connectParams.client.id === GATEWAY_CLIENT_IDS.CONTROL_UI;
         const isWebchat = isWebchatConnect(connectParams);
+        let originTokenOnlyAuth = false;
         if (enforceOriginCheckForAnyClient || isControlUi || isWebchat) {
           const originCheck = checkBrowserOrigin({
             requestHost,
@@ -489,6 +490,9 @@ export function attachGatewayWsMessageHandler(params: {
             close(1008, truncateCloseReason(errorMessage));
             return;
           }
+          if (originCheck.matched?.tokenOnlyAuth) {
+            originTokenOnlyAuth = true;
+          }
         }
 
         const deviceRaw = connectParams.device;
@@ -501,6 +505,7 @@ export function attachGatewayWsMessageHandler(params: {
           isControlUi,
           controlUiConfig: configSnapshot.gateway?.controlUi,
           deviceRaw,
+          originTokenOnlyAuth,
         });
         const device = controlUiAuthPolicy.device;
 
