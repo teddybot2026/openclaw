@@ -41,13 +41,18 @@ export async function resolveDeliveryTarget(
   agentId: string,
   jobPayload: {
     channel?: "last" | ChannelId;
-    to?: string;
+    to?: unknown;
     sessionKey?: string;
     accountId?: string;
   },
 ): Promise<DeliveryTargetResolution> {
   const requestedChannel = typeof jobPayload.channel === "string" ? jobPayload.channel : "last";
-  const explicitTo = typeof jobPayload.to === "string" ? jobPayload.to : undefined;
+  const explicitTo =
+    typeof jobPayload.to === "string"
+      ? jobPayload.to
+      : typeof jobPayload.to === "number" && Number.isFinite(jobPayload.to)
+        ? String(Math.trunc(jobPayload.to))
+        : undefined;
   const allowMismatchedLastTo = requestedChannel === "last";
 
   const sessionCfg = cfg.session;
@@ -203,7 +208,7 @@ export async function resolveDeliveryTarget(
   return {
     ok: true,
     channel,
-    to: docked.to,
+    to: docked.ok ? docked.to : toCandidate,
     accountId,
     threadId,
     mode,

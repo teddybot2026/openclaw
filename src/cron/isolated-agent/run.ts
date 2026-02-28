@@ -417,12 +417,17 @@ export async function runCronIsolatedAgentTurn(params: {
       verboseLevel: resolvedVerboseLevel,
     });
     const messageChannel = resolvedDelivery.channel;
+    // Use model fallback chain from job payload if provided; otherwise use agent config
+    const jobModelFallbacks =
+      params.job.payload.kind === "agentTurn" ? params.job.payload.modelFallbacks : undefined;
+    const fallbacksOverride =
+      jobModelFallbacks ?? resolveAgentModelFallbacksOverride(params.cfg, agentId);
     const fallbackResult = await runWithModelFallback({
       cfg: cfgWithAgentDefaults,
       provider,
       model,
       agentDir,
-      fallbacksOverride: resolveAgentModelFallbacksOverride(params.cfg, agentId),
+      fallbacksOverride,
       run: (providerOverride, modelOverride) => {
         if (abortSignal?.aborted) {
           throw new Error(abortReason());
@@ -475,6 +480,7 @@ export async function runCronIsolatedAgentTurn(params: {
     runResult = fallbackResult.result;
     fallbackProvider = fallbackResult.provider;
     fallbackModel = fallbackResult.model;
+    const _fallbackAttempts = fallbackResult.attempts;
     runEndedAt = Date.now();
   } catch (err) {
     return withRunSession({ status: "error", error: String(err) });
@@ -549,6 +555,31 @@ export async function runCronIsolatedAgentTurn(params: {
   let summary = pickSummaryFromPayloads(payloads) ?? pickSummaryFromOutput(firstText);
   let outputText = pickLastNonEmptyTextFromPayloads(payloads);
   let synthesizedText = outputText?.trim() || summary?.trim() || undefined;
+
+  // Add routing note if model fallback was used
+  if (fallbackAttempts && fallbackAttempts.length > 0) {
+    const routingChain = [
+      { provider: fallbackProvider, model: fallbackModel, success: true },
+      ...fallbackAttempts.map((attempt) => ({
+        provider: attempt.provider,
+        model: attempt.model,
+        success: false,
+        error: attempt.error,
+      })),
+    ].toReversed();
+    const chainSummary = routingChain
+      .map((entry) => `${entry.provider}/${entry.model}${entry.success ? " ✓" : " ✗"}`)
+      .join(" → ");
+    const routingNote = `[ROUTING] Model chain: ${chainSummary}`;
+    if (summary) {
+      summary = `${routingNote}\n\n${summary}`;
+    } else {
+      summary = routingNote;
+    }
+    if (outputText) {
+      outputText = `${routingNote}\n\n${outputText}`;
+    }
+  }
   const deliveryPayload = pickLastDeliverablePayload(payloads);
   let deliveryPayloads =
     deliveryPayload !== undefined

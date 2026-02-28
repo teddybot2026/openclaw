@@ -22,6 +22,15 @@ function isAuthCooldownBypassedForProvider(provider: string | undefined): boolea
   return normalizeProviderId(provider ?? "") === "openrouter";
 }
 
+/**
+ * Build a usage stats key. When modelKey is provided, use composite key
+ * "profileId:modelKey" for model-level cooldown tracking. Otherwise use
+ * just "profileId" for profile-level cooldown (backward compatible).
+ */
+function buildUsageKey(profileId: string, modelKey?: string): string {
+  return modelKey ? `${profileId}:${modelKey}` : profileId;
+}
+
 export function resolveProfileUnusableUntil(
   stats: Pick<ProfileUsageStats, "cooldownUntil" | "disabledUntil">,
 ): number | null {
@@ -36,12 +45,24 @@ export function resolveProfileUnusableUntil(
 
 /**
  * Check if a profile is currently in cooldown (due to rate limiting or errors).
+ * When modelKey is provided AND config enabled, checks model-level cooldown; otherwise checks profile-level.
  */
-export function isProfileInCooldown(store: AuthProfileStore, profileId: string): boolean {
-  if (isAuthCooldownBypassedForProvider(store.profiles[profileId]?.provider)) {
-    return false;
-  }
-  const stats = store.usageStats?.[profileId];
+export function isProfileInCooldown(
+  store: AuthProfileStore,
+  profileId: string,
+  modelKey?: string,
+): boolean {
+  // Get config to check if model-level cooldown is enabled
+  const providerKey = store.profiles[profileId]?.provider
+    ? normalizeProviderId(store.profiles[profileId].provider)
+    : "default";
+  const cfgResolved = resolveAuthCooldownConfig({ cfg: undefined, providerId: providerKey });
+  const modelLevelEnabled = cfgResolved.modelLevelEnabled;
+
+  // Use model-level key only if config enabled AND modelKey provided
+  const effectiveKey =
+    modelLevelEnabled && modelKey ? buildUsageKey(profileId, modelKey) : profileId;
+  const stats = store.usageStats?.[effectiveKey];
   if (!stats) {
     return false;
   }
@@ -132,15 +153,32 @@ export function resolveProfilesUnavailableReason(params: {
  * Return the soonest `unusableUntil` timestamp (ms epoch) among the given
  * profiles, or `null` when no profile has a recorded cooldown. Note: the
  * returned timestamp may be in the past if the cooldown has already expired.
+ *
+ * @param profileIds - Array of profile IDs to check
+ * @param modelKeys - Optional array of model keys (one per profileId) for model-level cooldown
  */
 export function getSoonestCooldownExpiry(
   store: AuthProfileStore,
   profileIds: string[],
+  modelKeys?: string[],
 ): number | null {
   let soonest: number | null = null;
-  for (const id of profileIds) {
-    const stats = store.usageStats?.[id];
+  for (let i = 0; i < profileIds.length; i++) {
+    const profileId = profileIds[i];
+    const modelKey = modelKeys?.[i];
+    const usageKey = buildUsageKey(profileId, modelKey);
+    const stats = store.usageStats?.[usageKey];
     if (!stats) {
+      // Fallback to profile-level if model-level stats don't exist
+      if (modelKey && store.usageStats?.[profileId]) {
+        const fallbackStats = store.usageStats[profileId];
+        const until = resolveProfileUnusableUntil(fallbackStats);
+        if (typeof until === "number" && Number.isFinite(until) && until > 0) {
+          if (soonest === null || until < soonest) {
+            soonest = until;
+          }
+        }
+      }
       continue;
     }
     const until = resolveProfileUnusableUntil(stats);
@@ -228,13 +266,27 @@ export function clearExpiredCooldowns(store: AuthProfileStore, now?: number): bo
 /**
  * Mark a profile as successfully used. Resets error count and updates lastUsed.
  * Uses store lock to avoid overwriting concurrent usage updates.
+ * When modelKey is provided, tracks model-level usage; otherwise tracks profile-level.
  */
 export async function markAuthProfileUsed(params: {
   store: AuthProfileStore;
   profileId: string;
+  modelKey?: string;
   agentDir?: string;
 }): Promise<void> {
-  const { store, profileId, agentDir } = params;
+  const { store, profileId, modelKey, agentDir } = params;
+
+  // Get config to check if model-level cooldown is enabled
+  const providerKey = store.profiles[profileId]?.provider
+    ? normalizeProviderId(store.profiles[profileId].provider)
+    : "default";
+  const cfgResolved = resolveAuthCooldownConfig({ cfg: undefined, providerId: providerKey });
+  const modelLevelEnabled = cfgResolved.modelLevelEnabled;
+
+  // Use model-level key only if config enabled AND modelKey provided
+  const effectiveKey =
+    modelLevelEnabled && modelKey ? buildUsageKey(profileId, modelKey) : profileId;
+
   const updated = await updateAuthProfileStoreWithLock({
     agentDir,
     updater: (freshStore) => {
@@ -242,8 +294,8 @@ export async function markAuthProfileUsed(params: {
         return false;
       }
       freshStore.usageStats = freshStore.usageStats ?? {};
-      freshStore.usageStats[profileId] = {
-        ...freshStore.usageStats[profileId],
+      freshStore.usageStats[effectiveKey] = {
+        ...freshStore.usageStats[effectiveKey],
         lastUsed: Date.now(),
         errorCount: 0,
         cooldownUntil: undefined,
@@ -263,7 +315,7 @@ export async function markAuthProfileUsed(params: {
   }
 
   store.usageStats = store.usageStats ?? {};
-  store.usageStats[profileId] = {
+  store.usageStats[effectiveKey] = {
     ...store.usageStats[profileId],
     lastUsed: Date.now(),
     errorCount: 0,
@@ -287,6 +339,7 @@ type ResolvedAuthCooldownConfig = {
   billingBackoffMs: number;
   billingMaxMs: number;
   failureWindowMs: number;
+  modelLevelEnabled: boolean;
 };
 
 function resolveAuthCooldownConfig(params: {
@@ -330,6 +383,7 @@ function resolveAuthCooldownConfig(params: {
     billingBackoffMs: billingBackoffHours * 60 * 60 * 1000,
     billingMaxMs: billingMaxHours * 60 * 60 * 1000,
     failureWindowMs: failureWindowHours * 60 * 60 * 1000,
+    modelLevelEnabled: cooldowns?.modelLevelEnabled ?? false,
   };
 }
 
@@ -432,15 +486,27 @@ function computeNextProfileUsageStats(params: {
 export async function markAuthProfileFailure(params: {
   store: AuthProfileStore;
   profileId: string;
+  modelKey?: string;
   reason: AuthProfileFailureReason;
   cfg?: OpenClawConfig;
   agentDir?: string;
 }): Promise<void> {
-  const { store, profileId, reason, agentDir, cfg } = params;
-  const profile = store.profiles[profileId];
-  if (!profile || isAuthCooldownBypassedForProvider(profile.provider)) {
-    return;
-  }
+  const { store, profileId, modelKey, reason, agentDir, cfg } = params;
+
+  // Get config to check if model-level cooldown is enabled
+  const providerKey = store.profiles[profileId]?.provider
+    ? normalizeProviderId(store.profiles[profileId].provider)
+    : "default";
+  const cfgResolved = resolveAuthCooldownConfig({ cfg, providerId: providerKey });
+  const modelLevelEnabled = cfgResolved.modelLevelEnabled;
+
+  // Determine the effective key for tracking cooldown
+  // - Billing failures (401, 403, invalid key) always use profile-level
+  // - Otherwise, use model-level if config enabled AND modelKey provided
+  const usageKey = buildUsageKey(profileId, modelKey);
+  const effectiveKey =
+    reason === "billing" || !modelLevelEnabled || !modelKey ? profileId : usageKey;
+
   const updated = await updateAuthProfileStoreWithLock({
     agentDir,
     updater: (freshStore) => {
@@ -449,16 +515,11 @@ export async function markAuthProfileFailure(params: {
         return false;
       }
       freshStore.usageStats = freshStore.usageStats ?? {};
-      const existing = freshStore.usageStats[profileId] ?? {};
+      const existing = freshStore.usageStats[effectiveKey] ?? {};
 
       const now = Date.now();
-      const providerKey = normalizeProviderId(profile.provider);
-      const cfgResolved = resolveAuthCooldownConfig({
-        cfg,
-        providerId: providerKey,
-      });
-
-      freshStore.usageStats[profileId] = computeNextProfileUsageStats({
+      // Use the already-resolved config
+      freshStore.usageStats[effectiveKey] = computeNextProfileUsageStats({
         existing,
         now,
         reason,
@@ -476,15 +537,17 @@ export async function markAuthProfileFailure(params: {
   }
 
   store.usageStats = store.usageStats ?? {};
-  const existing = store.usageStats[profileId] ?? {};
+  const existing = store.usageStats[effectiveKey] ?? {};
   const now = Date.now();
-  const providerKey = normalizeProviderId(store.profiles[profileId]?.provider ?? "");
-  const cfgResolved = resolveAuthCooldownConfig({
-    cfg,
-    providerId: providerKey,
+  // Use the already-resolved config
+  store.usageStats[effectiveKey] = computeNextProfileUsageStats({
+    existing,
+    now,
+    reason,
+    cfgResolved,
   });
 
-  store.usageStats[profileId] = computeNextProfileUsageStats({
+  store.usageStats[effectiveKey] = computeNextProfileUsageStats({
     existing,
     now,
     reason,
@@ -501,11 +564,13 @@ export async function markAuthProfileFailure(params: {
 export async function markAuthProfileCooldown(params: {
   store: AuthProfileStore;
   profileId: string;
+  modelKey?: string;
   agentDir?: string;
 }): Promise<void> {
   await markAuthProfileFailure({
     store: params.store,
     profileId: params.profileId,
+    modelKey: params.modelKey,
     reason: "unknown",
     agentDir: params.agentDir,
   });

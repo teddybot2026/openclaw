@@ -192,6 +192,9 @@ function resolveActiveErrorContext(params: {
 export async function runEmbeddedPiAgent(
   params: RunEmbeddedPiAgentParams,
 ): Promise<EmbeddedPiRunResult> {
+  // Track the model being used for model-level cooldown
+  let lastModelId: string | undefined;
+
   const sessionLane = resolveSessionLane(params.sessionKey?.trim() || params.sessionId);
   const globalLane = resolveGlobalLane(params.lane);
   const enqueueGlobal =
@@ -297,6 +300,8 @@ export async function runEmbeddedPiAgent(
         agentDir,
         params.config,
       );
+      // Track the model being used for model-level cooldown
+      lastModelId = modelId;
       if (!model) {
         throw new FailoverError(error ?? `Unknown model: ${provider}/${modelId}`, {
           reason: "model_not_found",
@@ -518,6 +523,7 @@ export async function runEmbeddedPiAgent(
       let runLoopIterations = 0;
       const maybeMarkAuthProfileFailure = async (failure: {
         profileId?: string;
+        modelKey?: string;
         reason?: Parameters<typeof markAuthProfileFailure>[0]["reason"] | null;
         config?: RunEmbeddedPiAgentParams["config"];
         agentDir?: RunEmbeddedPiAgentParams["agentDir"];
@@ -995,6 +1001,7 @@ export async function runEmbeddedPiAgent(
               // on the same provider (e.g. gpt-5.3 timeout blocks gpt-5.2).
               await maybeMarkAuthProfileFailure({
                 profileId: lastProfileId,
+                modelKey: lastModelId,
                 reason,
               });
               if (timedOut && !isProbeSession) {
@@ -1127,6 +1134,7 @@ export async function runEmbeddedPiAgent(
             await markAuthProfileUsed({
               store: authStore,
               profileId: lastProfileId,
+              modelKey: lastModelId,
               agentDir: params.agentDir,
             });
           }
