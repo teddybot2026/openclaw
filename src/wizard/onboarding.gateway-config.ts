@@ -233,9 +233,10 @@ export async function configureGatewayForOnboarding(
 
   const controlUiEnabled = nextConfig.gateway?.controlUi?.enabled ?? true;
   const hasExplicitControlUiAllowedOrigins =
-    (nextConfig.gateway?.controlUi?.allowedOrigins ?? []).some(
-      (origin) => origin.trim().length > 0,
-    ) || nextConfig.gateway?.controlUi?.dangerouslyAllowHostHeaderOriginFallback === true;
+    (nextConfig.gateway?.controlUi?.allowedOrigins ?? []).some((entry) => {
+      const origin = typeof entry === "string" ? entry : (entry.origin ?? "");
+      return origin.trim().length > 0;
+    }) || nextConfig.gateway?.controlUi?.dangerouslyAllowHostHeaderOriginFallback === true;
   if (controlUiEnabled && bind !== "loopback" && !hasExplicitControlUiAllowedOrigins) {
     nextConfig = {
       ...nextConfig,

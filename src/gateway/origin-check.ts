@@ -1,6 +1,13 @@
+import type { AllowedOriginEntry } from "../config/types.gateway.js";
 import { isLoopbackHost, normalizeHostHeader, resolveHostName } from "./net.js";
 
-type OriginCheckResult = { ok: true } | { ok: false; reason: string };
+/** Resolved metadata about the matched origin entry (if any). */
+export type MatchedOriginInfo = {
+  /** Whether this origin entry has `tokenOnlyAuth` enabled. */
+  tokenOnlyAuth: boolean;
+};
+
+type OriginCheckResult = { ok: true; matched?: MatchedOriginInfo } | { ok: false; reason: string };
 
 function parseOrigin(
   originRaw?: string,
@@ -21,10 +28,27 @@ function parseOrigin(
   }
 }
 
+/**
+ * Normalize an AllowedOriginEntry (string or object) to its origin string
+ * and per-origin options.
+ */
+function normalizeOriginEntry(entry: AllowedOriginEntry): {
+  origin: string;
+  tokenOnlyAuth: boolean;
+} {
+  if (typeof entry === "string") {
+    return { origin: entry.trim().toLowerCase(), tokenOnlyAuth: false };
+  }
+  return {
+    origin: entry.origin.trim().toLowerCase(),
+    tokenOnlyAuth: entry.tokenOnlyAuth === true,
+  };
+}
+
 export function checkBrowserOrigin(params: {
   requestHost?: string;
   origin?: string;
-  allowedOrigins?: string[];
+  allowedOrigins?: AllowedOriginEntry[];
   allowHostHeaderOriginFallback?: boolean;
 }): OriginCheckResult {
   const parsedOrigin = parseOrigin(params.origin);
@@ -32,11 +56,13 @@ export function checkBrowserOrigin(params: {
     return { ok: false, reason: "origin missing or invalid" };
   }
 
-  const allowlist = (params.allowedOrigins ?? [])
-    .map((value) => value.trim().toLowerCase())
-    .filter(Boolean);
-  if (allowlist.includes(parsedOrigin.origin)) {
-    return { ok: true };
+  const entries = (params.allowedOrigins ?? []).map(normalizeOriginEntry);
+  const matched = entries.find((e) => e.origin && e.origin === parsedOrigin.origin);
+  if (matched) {
+    return {
+      ok: true,
+      matched: { tokenOnlyAuth: matched.tokenOnlyAuth },
+    };
   }
 
   const requestHost = normalizeHostHeader(params.requestHost);
