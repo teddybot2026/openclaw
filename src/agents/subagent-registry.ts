@@ -76,6 +76,8 @@ const ANNOUNCE_EXPIRY_MS = 5 * 60_000; // 5 minutes
 
 type SubagentRunOrphanReason = "missing-session-entry" | "missing-session-id" | "stale-unended-run";
 
+const LIFECYCLE_ERROR_RETRY_GRACE_MS = 15_000;
+
 function resolveAnnounceRetryDelayMs(retryCount: number) {
   const boundedRetryCount = Math.max(0, Math.min(retryCount, 10));
   // retryCount is "attempts already made", so retry #1 waits 1s, then 2s, 4s...
