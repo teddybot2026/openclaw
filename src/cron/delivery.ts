@@ -21,6 +21,9 @@ function normalizeChannel(value: unknown): CronMessageChannel | undefined {
 }
 
 function normalizeTo(value: unknown): string | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(Math.trunc(value));
+  }
   if (typeof value !== "string") {
     return undefined;
   }
