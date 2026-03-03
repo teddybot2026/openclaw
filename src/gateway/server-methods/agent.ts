@@ -495,7 +495,9 @@ export const agentHandlers: GatewayRequestHandlers = {
         ? request.replyTo.trim()
         : typeof request.to === "string" && request.to.trim()
           ? request.to.trim()
-          : undefined;
+          : typeof request.to === "number" && Number.isFinite(request.to)
+            ? String(Math.trunc(request.to))
+            : undefined;
     const explicitThreadId =
       typeof request.threadId === "string" && request.threadId.trim()
         ? request.threadId.trim()
@@ -763,6 +765,53 @@ export const agentHandlers: GatewayRequestHandlers = {
       startedAt: snapshot.startedAt,
       endedAt: snapshot.endedAt,
       error: snapshot.error,
+    });
+  },
+
+  /**
+   * Get active sessions and subagent runs.
+   * This can be used by external systems (like the dashboard) to determine
+   * which sessions are still active vs orphaned after a gateway restart.
+   */
+  "agent.sessions.active": async ({ respond }) => {
+    // Import here to avoid circular dependencies
+    const { getSubagentRunsSnapshotForRead } =
+      await import("../../agents/subagent-registry-state.js");
+
+    // Get combined snapshot (disk + memory)
+    const runsSnapshot = getSubagentRunsSnapshotForRead(new Map());
+
+    // Filter to only active runs (no endedAt)
+    const activeRuns: Array<{
+      runId: string;
+      childSessionKey: string;
+      requesterSessionKey: string;
+      task: string;
+      startedAt: number;
+      createdAt: number;
+    }> = [];
+
+    for (const [runId, entry] of runsSnapshot.entries()) {
+      if (!entry) {
+        continue;
+      }
+      // Only include runs that haven't ended
+      if (typeof entry.endedAt !== "number") {
+        activeRuns.push({
+          runId,
+          childSessionKey: entry.childSessionKey,
+          requesterSessionKey: entry.requesterSessionKey,
+          task: entry.task,
+          startedAt: entry.startedAt ?? entry.createdAt ?? 0,
+          createdAt: entry.createdAt ?? 0,
+        });
+      }
+    }
+
+    respond(true, {
+      activeRuns,
+      activeCount: activeRuns.length,
+      timestamp: Date.now(),
     });
   },
 };

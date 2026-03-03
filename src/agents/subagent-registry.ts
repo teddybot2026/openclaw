@@ -14,10 +14,12 @@ import { type DeliveryContext, normalizeDeliveryContext } from "../utils/deliver
 import { resetAnnounceQueuesForTests } from "./subagent-announce-queue.js";
 import { runSubagentAnnounceFlow, type SubagentRunOutcome } from "./subagent-announce.js";
 import {
+  SUBAGENT_ENDED_OUTCOME_ERROR,
   SUBAGENT_ENDED_OUTCOME_KILLED,
   SUBAGENT_ENDED_REASON_COMPLETE,
   SUBAGENT_ENDED_REASON_ERROR,
   SUBAGENT_ENDED_REASON_KILLED,
+  SUBAGENT_ENDED_REASON_ORPHANED,
   type SubagentLifecycleEndedReason,
 } from "./subagent-lifecycle-events.js";
 import {
@@ -29,6 +31,7 @@ import {
   resolveLifecycleOutcomeFromRunOutcome,
   runOutcomesEqual,
 } from "./subagent-registry-completion.js";
+import { recoverOrphanedSubagentRuns } from "./subagent-registry-orphan-recovery.js";
 import {
   countActiveDescendantRunsFromRuns,
   countActiveRunsForSessionFromRuns,
@@ -74,7 +77,14 @@ const ANNOUNCE_EXPIRY_MS = 5 * 60_000; // 5 minutes
  * cap prevents indefinite pending state when descendants never fully settle.
  */
 const ANNOUNCE_COMPLETION_HARD_EXPIRY_MS = 30 * 60_000; // 30 minutes
-type SubagentRunOrphanReason = "missing-session-entry" | "missing-session-id";
+/**
+ * Maximum time a run can be "in progress" (no endedAt) before we consider it orphaned.
+ * This matches the value in subagent-registry-orphan-recovery.ts
+ */
+const ORPHAN_RUN_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+type SubagentRunOrphanReason = "missing-session-entry" | "missing-session-id" | "stale-unended-run";
+
 /**
  * Embedded runs can emit transient lifecycle `error` events while provider/model
  * retry is still in progress. Defer terminal error cleanup briefly so a
@@ -169,8 +179,8 @@ function reconcileOrphanedRun(params: {
     params.entry.outcome = orphanOutcome;
     changed = true;
   }
-  if (params.entry.endedReason !== SUBAGENT_ENDED_REASON_ERROR) {
-    params.entry.endedReason = SUBAGENT_ENDED_REASON_ERROR;
+  if (params.entry.endedReason !== SUBAGENT_ENDED_REASON_ORPHANED) {
+    params.entry.endedReason = SUBAGENT_ENDED_REASON_ORPHANED;
     changed = true;
   }
   if (params.entry.cleanupHandled !== true) {
@@ -428,6 +438,24 @@ function resumeSubagentRun(runId: string) {
   if (!entry) {
     return;
   }
+
+  // Quick check: if run has been around too long without ending, mark as orphaned
+  const now = Date.now();
+  const runAge = now - (entry.createdAt ?? 0);
+  if (typeof entry.endedAt !== "number" && runAge > ORPHAN_RUN_MAX_AGE_MS) {
+    if (
+      reconcileOrphanedRun({
+        runId,
+        entry,
+        reason: "stale-unended-run",
+        source: "resume",
+      })
+    ) {
+      persistSubagentRuns();
+    }
+    return;
+  }
+
   const orphanReason = resolveSubagentRunOrphanReason({ entry });
   if (orphanReason) {
     if (
@@ -463,15 +491,15 @@ function resumeSubagentRun(runId: string) {
     return;
   }
 
-  const now = Date.now();
+  const now2 = Date.now();
   const delayMs = resolveAnnounceRetryDelayMs(entry.announceRetryCount ?? 0);
   const earliestRetryAt = (entry.lastAnnounceRetryAt ?? 0) + delayMs;
   if (
     entry.expectsCompletionMessage === true &&
     entry.lastAnnounceRetryAt &&
-    now < earliestRetryAt
+    now2 < earliestRetryAt
   ) {
-    const waitMs = Math.max(1, earliestRetryAt - now);
+    const waitMs = Math.max(1, earliestRetryAt - now2);
     setTimeout(() => {
       resumedRuns.delete(runId);
       resumeSubagentRun(runId);
@@ -511,6 +539,28 @@ function restoreSubagentRunsOnce() {
     });
     if (restoredCount === 0) {
       return;
+    }
+    // Recover orphaned runs that were interrupted by gateway restart
+    const orphanResult = recoverOrphanedSubagentRuns(subagentRuns);
+    if (orphanResult.recovered > 0) {
+      defaultRuntime.log(
+        `[info] Subagent orphan recovery: recovered ${orphanResult.recovered} orphaned run(s)`,
+      );
+      for (const [runId, reason] of orphanResult.reasons) {
+        defaultRuntime.log(`[debug] Subagent orphan run ${runId}: ${reason}`);
+      }
+      // Emit subagent_ended hooks for recovered orphaned runs so dashboard/task status gets updated
+      for (const entry of orphanResult.recoveredEntries) {
+        const reason = orphanResult.reasons.get(entry.runId) ?? "unknown";
+        void emitSubagentEndedHookOnce({
+          entry,
+          reason: SUBAGENT_ENDED_REASON_ORPHANED,
+          outcome: SUBAGENT_ENDED_OUTCOME_ERROR,
+          error: `orphaned: ${reason} (gateway restart recovery)`,
+          inFlightRunIds: endedHookInFlightRunIds,
+          persist: persistSubagentRuns,
+        });
+      }
     }
     if (reconcileOrphanedRestoredRuns()) {
       persistSubagentRuns();

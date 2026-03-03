@@ -10,13 +10,15 @@ export const SUBAGENT_ENDED_REASON_ERROR = "subagent-error" as const;
 export const SUBAGENT_ENDED_REASON_KILLED = "subagent-killed" as const;
 export const SUBAGENT_ENDED_REASON_SESSION_RESET = "session-reset" as const;
 export const SUBAGENT_ENDED_REASON_SESSION_DELETE = "session-delete" as const;
+export const SUBAGENT_ENDED_REASON_ORPHANED = "subagent-orphaned" as const;
 
 export type SubagentLifecycleEndedReason =
   | typeof SUBAGENT_ENDED_REASON_COMPLETE
   | typeof SUBAGENT_ENDED_REASON_ERROR
   | typeof SUBAGENT_ENDED_REASON_KILLED
   | typeof SUBAGENT_ENDED_REASON_SESSION_RESET
-  | typeof SUBAGENT_ENDED_REASON_SESSION_DELETE;
+  | typeof SUBAGENT_ENDED_REASON_SESSION_DELETE
+  | typeof SUBAGENT_ENDED_REASON_ORPHANED;
 
 export type SubagentSessionLifecycleEndedReason =
   | typeof SUBAGENT_ENDED_REASON_SESSION_RESET

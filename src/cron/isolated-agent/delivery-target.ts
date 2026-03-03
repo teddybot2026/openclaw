@@ -41,14 +41,18 @@ export async function resolveDeliveryTarget(
   agentId: string,
   jobPayload: {
     channel?: "last" | ChannelId;
-    to?: string;
-    /** Explicit accountId from job.delivery — overrides session-derived and binding-derived values. */
-    accountId?: string;
+    to?: unknown;
     sessionKey?: string;
+    accountId?: string;
   },
 ): Promise<DeliveryTargetResolution> {
   const requestedChannel = typeof jobPayload.channel === "string" ? jobPayload.channel : "last";
-  const explicitTo = typeof jobPayload.to === "string" ? jobPayload.to : undefined;
+  const explicitTo =
+    typeof jobPayload.to === "string"
+      ? jobPayload.to
+      : typeof jobPayload.to === "number" && Number.isFinite(jobPayload.to)
+        ? String(Math.trunc(jobPayload.to))
+        : undefined;
   const allowMismatchedLastTo = requestedChannel === "last";
 
   const sessionCfg = cfg.session;
@@ -102,14 +106,11 @@ export async function resolveDeliveryTarget(
   const mode = resolved.mode as "explicit" | "implicit";
   let toCandidate = resolved.to;
 
-  // Prefer an explicit accountId from the job's delivery config (set via
-  // --account on cron add/edit). Fall back to the session's lastAccountId,
-  // then to the agent's bound account from bindings config.
-  const explicitAccountId =
-    typeof jobPayload.accountId === "string" && jobPayload.accountId.trim()
-      ? jobPayload.accountId.trim()
-      : undefined;
-  let accountId = explicitAccountId ?? resolved.accountId;
+  // When the session has no lastAccountId (e.g. first-run isolated cron
+  // session), fall back to the agent's bound account from bindings config.
+  // This ensures the message tool in isolated sessions resolves the correct
+  // bot token for multi-account setups.
+  let accountId = resolved.accountId;
   if (!accountId && channel) {
     const bindings = buildChannelAccountBindings(cfg);
     const byAgent = bindings.get(channel);
@@ -119,7 +120,7 @@ export async function resolveDeliveryTarget(
     }
   }
 
-  // job.delivery.accountId takes highest precedence — explicitly set by the job author.
+  // Explicit delivery account should override inferred session/binding account.
   if (jobPayload.accountId) {
     accountId = jobPayload.accountId;
   }
@@ -207,7 +208,7 @@ export async function resolveDeliveryTarget(
   return {
     ok: true,
     channel,
-    to: docked.to,
+    to: docked.ok ? docked.to : toCandidate,
     accountId,
     threadId,
     mode,
