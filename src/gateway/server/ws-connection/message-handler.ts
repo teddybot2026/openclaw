@@ -38,7 +38,6 @@ import {
   normalizeDeviceMetadataForAuth,
 } from "../../device-auth.js";
 import {
-  isLanSubnetAddress,
   isLocalishHost,
   isLoopbackAddress,
   isTrustedProxyAddress,
@@ -46,7 +45,7 @@ import {
 } from "../../net.js";
 import { resolveNodeCommandAllowlist } from "../../node-command-policy.js";
 import { checkBrowserOrigin } from "../../origin-check.js";
-import { GATEWAY_CLIENT_IDS } from "../../protocol/client-info.js";
+import { GATEWAY_CLIENT_IDS, GATEWAY_CLIENT_MODES } from "../../protocol/client-info.js";
 import {
   ConnectErrorDetailCodes,
   resolveDeviceAuthConnectErrorDetailCode,
@@ -92,6 +91,10 @@ type SubsystemLogger = ReturnType<typeof createSubsystemLogger>;
 const DEVICE_SIGNATURE_SKEW_MS = 2 * 60 * 1000;
 const BROWSER_ORIGIN_LOOPBACK_RATE_LIMIT_IP = "198.18.0.1";
 
+export type WsOriginCheckMetrics = {
+  hostHeaderFallbackAccepted: number;
+};
+
 type HandshakeBrowserSecurityContext = {
   hasBrowserOriginHeader: boolean;
   enforceOriginCheckForAnyClient: boolean;
@@ -134,6 +137,28 @@ function shouldAllowSilentLocalPairing(params: {
     params.isLocalClient &&
     (!params.hasBrowserOriginHeader || params.isControlUi || params.isWebchat) &&
     (params.reason === "not-paired" || params.reason === "scope-upgrade")
+  );
+}
+
+function shouldSkipBackendSelfPairing(params: {
+  connectParams: ConnectParams;
+  isLocalClient: boolean;
+  hasBrowserOriginHeader: boolean;
+  sharedAuthOk: boolean;
+  authMethod: GatewayAuthResult["method"];
+}): boolean {
+  const isGatewayBackendClient =
+    params.connectParams.client.id === GATEWAY_CLIENT_IDS.GATEWAY_CLIENT &&
+    params.connectParams.client.mode === GATEWAY_CLIENT_MODES.BACKEND;
+  if (!isGatewayBackendClient) {
+    return false;
+  }
+  const usesSharedSecretAuth = params.authMethod === "token" || params.authMethod === "password";
+  return (
+    params.isLocalClient &&
+    !params.hasBrowserOriginHeader &&
+    params.sharedAuthOk &&
+    usesSharedSecretAuth
   );
 }
 
@@ -238,6 +263,7 @@ export function attachGatewayWsMessageHandler(params: {
   setHandshakeState: (state: "pending" | "connected" | "failed") => void;
   setCloseCause: (cause: string, meta?: Record<string, unknown>) => void;
   setLastFrameMeta: (meta: { type?: string; method?: string; id?: string }) => void;
+  originCheckMetrics: WsOriginCheckMetrics;
   logGateway: SubsystemLogger;
   logHealth: SubsystemLogger;
   logWsControl: SubsystemLogger;
@@ -270,6 +296,7 @@ export function attachGatewayWsMessageHandler(params: {
     setHandshakeState,
     setCloseCause,
     setLastFrameMeta,
+    originCheckMetrics,
     logGateway,
     logHealth,
     logWsControl,
@@ -469,14 +496,15 @@ export function attachGatewayWsMessageHandler(params: {
 
         const isControlUi = connectParams.client.id === GATEWAY_CLIENT_IDS.CONTROL_UI;
         const isWebchat = isWebchatConnect(connectParams);
-        let originTokenOnlyAuth = false;
         if (enforceOriginCheckForAnyClient || isControlUi || isWebchat) {
+          const hostHeaderOriginFallbackEnabled =
+            configSnapshot.gateway?.controlUi?.dangerouslyAllowHostHeaderOriginFallback === true;
           const originCheck = checkBrowserOrigin({
             requestHost,
             origin: requestOrigin,
             allowedOrigins: configSnapshot.gateway?.controlUi?.allowedOrigins,
-            allowHostHeaderOriginFallback:
-              configSnapshot.gateway?.controlUi?.dangerouslyAllowHostHeaderOriginFallback === true,
+            allowHostHeaderOriginFallback: hostHeaderOriginFallbackEnabled,
+            isLocalClient,
           });
           if (!originCheck.ok) {
             const errorMessage =
@@ -490,8 +518,16 @@ export function attachGatewayWsMessageHandler(params: {
             close(1008, truncateCloseReason(errorMessage));
             return;
           }
-          if (originCheck.matched?.tokenOnlyAuth) {
-            originTokenOnlyAuth = true;
+          if (originCheck.matchedBy === "host-header-fallback") {
+            originCheckMetrics.hostHeaderFallbackAccepted += 1;
+            logWsControl.warn(
+              `security warning: websocket origin accepted via Host-header fallback conn=${connId} count=${originCheckMetrics.hostHeaderFallbackAccepted} host=${requestHost ?? "n/a"} origin=${requestOrigin ?? "n/a"}`,
+            );
+            if (hostHeaderOriginFallbackEnabled) {
+              logGateway.warn(
+                "security metric: gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback accepted a websocket connect request",
+              );
+            }
           }
         }
 
@@ -505,7 +541,6 @@ export function attachGatewayWsMessageHandler(params: {
           isControlUi,
           controlUiConfig: configSnapshot.gateway?.controlUi,
           deviceRaw,
-          originTokenOnlyAuth,
         });
         const device = controlUiAuthPolicy.device;
 
@@ -563,9 +598,14 @@ export function attachGatewayWsMessageHandler(params: {
           });
           close(1008, truncateCloseReason(authMessage));
         };
-        const clearUnboundScopes = () => {
+        const clearUnboundScopes = (trustedProxyAuthOk = false) => {
           // Don't clear scopes if Control UI bypass is allowed
           if (controlUiAuthPolicy.allowBypass) {
+            return;
+          }
+          // Don't clear scopes for trusted-proxy Control UI operators — they are
+          // pre-authenticated by the reverse proxy and must retain requested scopes.
+          if (trustedProxyAuthOk) {
             return;
           }
           // Don't clear scopes if client is from a trusted LAN subnet with valid shared auth
@@ -580,9 +620,6 @@ export function attachGatewayWsMessageHandler(params: {
           }
         };
         const handleMissingDeviceIdentity = (): boolean => {
-          if (!device) {
-            clearUnboundScopes();
-          }
           const trustedProxyAuthOk = isTrustedProxyControlUiOperatorAuth({
             isControlUi,
             role,
@@ -590,6 +627,9 @@ export function attachGatewayWsMessageHandler(params: {
             authOk,
             authMethod,
           });
+          if (!device) {
+            clearUnboundScopes(trustedProxyAuthOk);
+          }
           const decision = evaluateMissingDeviceIdentity({
             hasDeviceIdentity: Boolean(device),
             role,
@@ -728,11 +768,14 @@ export function attachGatewayWsMessageHandler(params: {
           authOk,
           authMethod,
         });
-        const skipPairing = shouldSkipControlUiPairing(
-          controlUiAuthPolicy,
-          sharedAuthOk,
-          trustedProxyAuthOk,
-        );
+        const skipPairing =
+          shouldSkipBackendSelfPairing({
+            connectParams,
+            isLocalClient,
+            hasBrowserOriginHeader,
+            sharedAuthOk,
+            authMethod,
+          }) || shouldSkipControlUiPairing(controlUiAuthPolicy, sharedAuthOk, trustedProxyAuthOk);
         if (device && devicePublicKey && !skipPairing) {
           const formatAuditList = (items: string[] | undefined): string => {
             if (!items || items.length === 0) {
