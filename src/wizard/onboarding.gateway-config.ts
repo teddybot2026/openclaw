@@ -5,14 +5,11 @@ import {
 } from "../commands/onboard-helpers.js";
 import type { GatewayAuthChoice } from "../commands/onboard-types.js";
 import type { GatewayBindMode, GatewayTailscaleMode, OpenClawConfig } from "../config/config.js";
-import { ensureControlUiAllowedOriginsForNonLoopbackBind } from "../config/gateway-control-ui-origins.js";
 import {
-  maybeAddTailnetOriginToControlUiAllowedOrigins,
   TAILSCALE_DOCS_LINES,
   TAILSCALE_EXPOSURE_OPTIONS,
   TAILSCALE_MISSING_BIN_NOTE_LINES,
 } from "../gateway/gateway-config-prompts.shared.js";
-import { DEFAULT_DANGEROUS_NODE_COMMANDS } from "../gateway/node-command-policy.js";
 import { findTailscaleBinary } from "../infra/tailscale.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { validateIPv4AddressInput } from "../shared/net/ipv4.js";
@@ -22,6 +19,20 @@ import type {
   WizardFlow,
 } from "./onboarding.types.js";
 import type { WizardPrompter } from "./prompts.js";
+
+// These commands are "high risk" (privacy writes/recording) and should be
+// explicitly armed by the user when they want to use them.
+//
+// This only affects what the gateway will accept via node.invoke; the iOS app
+// still prompts for OS permissions (camera/photos/contacts/etc) on first use.
+const DEFAULT_DANGEROUS_NODE_DENY_COMMANDS = [
+  "camera.snap",
+  "camera.clip",
+  "screen.record",
+  "calendar.add",
+  "contacts.add",
+  "reminders.add",
+];
 
 type ConfigureGatewayOptions = {
   flow: WizardFlow;
@@ -37,6 +48,21 @@ type ConfigureGatewayResult = {
   nextConfig: OpenClawConfig;
   settings: GatewayWizardSettings;
 };
+
+function buildDefaultControlUiAllowedOrigins(params: {
+  port: number;
+  bind: GatewayWizardSettings["bind"];
+  customBindHost?: string;
+}): string[] {
+  const origins = new Set<string>([
+    `http://localhost:${params.port}`,
+    `http://127.0.0.1:${params.port}`,
+  ]);
+  if (params.bind === "custom" && params.customBindHost) {
+    origins.add(`http://${params.customBindHost}:${params.port}`);
+  }
+  return [...origins];
+}
 
 export async function configureGatewayForOnboarding(
   opts: ConfigureGatewayOptions,
@@ -111,10 +137,8 @@ export async function configureGatewayForOnboarding(
         });
 
   // Detect Tailscale binary before proceeding with serve/funnel setup.
-  // Persist the path so getTailnetHostname can reuse it for origin injection.
-  let tailscaleBin: string | null = null;
   if (tailscaleMode !== "off") {
-    tailscaleBin = await findTailscaleBinary();
+    const tailscaleBin = await findTailscaleBinary();
     if (!tailscaleBin) {
       await prompter.note(TAILSCALE_MISSING_BIN_NOTE_LINES.join("\n"), "Tailscale Warning");
     }
@@ -148,18 +172,12 @@ export async function configureGatewayForOnboarding(
   let gatewayToken: string | undefined;
   if (authMode === "token") {
     if (flow === "quickstart") {
-      gatewayToken =
-        (quickstartGateway.token ??
-          normalizeGatewayTokenInput(process.env.OPENCLAW_GATEWAY_TOKEN)) ||
-        randomToken();
+      gatewayToken = quickstartGateway.token ?? randomToken();
     } else {
       const tokenInput = await prompter.text({
         message: "Gateway token (blank to generate)",
         placeholder: "Needed for multi-machine or non-loopback access",
-        initialValue:
-          quickstartGateway.token ??
-          normalizeGatewayTokenInput(process.env.OPENCLAW_GATEWAY_TOKEN) ??
-          "",
+        initialValue: quickstartGateway.token ?? "",
       });
       gatewayToken = normalizeGatewayTokenInput(tokenInput) || randomToken();
     }
@@ -213,14 +231,28 @@ export async function configureGatewayForOnboarding(
     },
   };
 
-  nextConfig = ensureControlUiAllowedOriginsForNonLoopbackBind(nextConfig, {
-    requireControlUiEnabled: true,
-  }).config;
-  nextConfig = await maybeAddTailnetOriginToControlUiAllowedOrigins({
-    config: nextConfig,
-    tailscaleMode,
-    tailscaleBin,
-  });
+  const controlUiEnabled = nextConfig.gateway?.controlUi?.enabled ?? true;
+  const hasExplicitControlUiAllowedOrigins =
+    (nextConfig.gateway?.controlUi?.allowedOrigins ?? []).some((entry) => {
+      const origin = typeof entry === "string" ? entry : (entry.origin ?? "");
+      return origin.trim().length > 0;
+    }) || nextConfig.gateway?.controlUi?.dangerouslyAllowHostHeaderOriginFallback === true;
+  if (controlUiEnabled && bind !== "loopback" && !hasExplicitControlUiAllowedOrigins) {
+    nextConfig = {
+      ...nextConfig,
+      gateway: {
+        ...nextConfig.gateway,
+        controlUi: {
+          ...nextConfig.gateway?.controlUi,
+          allowedOrigins: buildDefaultControlUiAllowedOrigins({
+            port,
+            bind,
+            customBindHost,
+          }),
+        },
+      },
+    };
+  }
 
   // If this is a new gateway setup (no existing gateway settings), start with a
   // denylist for high-risk node commands. Users can arm these temporarily via
@@ -237,7 +269,7 @@ export async function configureGatewayForOnboarding(
         ...nextConfig.gateway,
         nodes: {
           ...nextConfig.gateway?.nodes,
-          denyCommands: [...DEFAULT_DANGEROUS_NODE_COMMANDS],
+          denyCommands: [...DEFAULT_DANGEROUS_NODE_DENY_COMMANDS],
         },
       },
     };

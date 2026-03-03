@@ -598,16 +598,28 @@ export function attachGatewayWsMessageHandler(params: {
           });
           close(1008, truncateCloseReason(authMessage));
         };
-        const clearUnboundScopes = () => {
-          if (scopes.length > 0 && !controlUiAuthPolicy.allowBypass && !sharedAuthOk) {
+        const clearUnboundScopes = (trustedProxyAuthOk = false) => {
+          // Don't clear scopes if Control UI bypass is allowed
+          if (controlUiAuthPolicy.allowBypass) {
+            return;
+          }
+          // Don't clear scopes for trusted-proxy Control UI operators — they are
+          // pre-authenticated by the reverse proxy and must retain requested scopes.
+          if (trustedProxyAuthOk) {
+            return;
+          }
+          // Don't clear scopes if client is from a trusted LAN subnet with valid shared auth
+          // This allows backend API servers on the local network to authenticate with
+          // shared tokens instead of device identities.
+          if (sharedAuthOk && isLanSubnetAddress(clientIp)) {
+            return;
+          }
+          if (scopes.length > 0) {
             scopes = [];
             connectParams.scopes = scopes;
           }
         };
         const handleMissingDeviceIdentity = (): boolean => {
-          if (!device) {
-            clearUnboundScopes();
-          }
           const trustedProxyAuthOk = isTrustedProxyControlUiOperatorAuth({
             isControlUi,
             role,
@@ -615,6 +627,9 @@ export function attachGatewayWsMessageHandler(params: {
             authOk,
             authMethod,
           });
+          if (!device) {
+            clearUnboundScopes(trustedProxyAuthOk);
+          }
           const decision = evaluateMissingDeviceIdentity({
             hasDeviceIdentity: Boolean(device),
             role,

@@ -128,57 +128,6 @@ function normalizeAllowFromList(list: Array<string | number> | undefined | null)
   return list.map((v) => String(v).trim()).filter(Boolean);
 }
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return undefined;
-  }
-  return value as Record<string, unknown>;
-}
-
-function hasNonEmptyString(value: unknown): boolean {
-  return typeof value === "string" && value.trim().length > 0;
-}
-
-function isFeishuDocToolEnabled(cfg: OpenClawConfig): boolean {
-  const channels = asRecord(cfg.channels);
-  const feishu = asRecord(channels?.feishu);
-  if (!feishu || feishu.enabled === false) {
-    return false;
-  }
-
-  const baseTools = asRecord(feishu.tools);
-  const baseDocEnabled = baseTools?.doc !== false;
-  const baseAppId = hasNonEmptyString(feishu.appId);
-  const baseAppSecret = hasNonEmptyString(feishu.appSecret);
-  const baseConfigured = baseAppId && baseAppSecret;
-
-  const accounts = asRecord(feishu.accounts);
-  if (!accounts || Object.keys(accounts).length === 0) {
-    return baseDocEnabled && baseConfigured;
-  }
-
-  for (const accountValue of Object.values(accounts)) {
-    const account = asRecord(accountValue) ?? {};
-    if (account.enabled === false) {
-      continue;
-    }
-    const accountTools = asRecord(account.tools);
-    const effectiveTools = accountTools ?? baseTools;
-    const docEnabled = effectiveTools?.doc !== false;
-    if (!docEnabled) {
-      continue;
-    }
-    const accountConfigured =
-      (hasNonEmptyString(account.appId) || baseAppId) &&
-      (hasNonEmptyString(account.appSecret) || baseAppSecret);
-    if (accountConfigured) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
 async function collectFilesystemFindings(params: {
   stateDir: string;
   configPath: string;
@@ -321,7 +270,7 @@ function collectGatewayConfigFindings(
   const auth = resolveGatewayAuth({ authConfig: cfg.gateway?.auth, tailscaleMode, env });
   const controlUiEnabled = cfg.gateway?.controlUi?.enabled !== false;
   const controlUiAllowedOrigins = (cfg.gateway?.controlUi?.allowedOrigins ?? [])
-    .map((value) => value.trim())
+    .map((value) => (typeof value === "string" ? value.trim() : (value.origin?.trim() ?? "")))
     .filter(Boolean);
   const dangerouslyAllowHostHeaderOriginFallback =
     cfg.gateway?.controlUi?.dangerouslyAllowHostHeaderOriginFallback === true;
@@ -417,18 +366,6 @@ function collectGatewayConfigFindings(
         "If your deployment intentionally relies on Host-header origin fallback, set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true.",
     });
   }
-  if (controlUiAllowedOrigins.includes("*")) {
-    const exposed = bind !== "loopback";
-    findings.push({
-      checkId: "gateway.control_ui.allowed_origins_wildcard",
-      severity: exposed ? "critical" : "warn",
-      title: "Control UI allowed origins contains wildcard",
-      detail:
-        'gateway.controlUi.allowedOrigins includes "*" which effectively disables origin allowlisting for Control UI/WebChat requests.',
-      remediation:
-        "Replace wildcard origins with explicit trusted origins (for example https://control.example.com).",
-    });
-  }
   if (dangerouslyAllowHostHeaderOriginFallback) {
     const exposed = bind !== "loopback";
     findings.push({
@@ -508,22 +445,32 @@ function collectGatewayConfigFindings(
     findings.push({
       checkId: "gateway.control_ui.device_auth_disabled",
       severity: "critical",
-      title: "DANGEROUS: Control UI device auth disabled",
+      title: "DANGEROUS: Control UI device auth disabled (deprecated)",
       detail:
-        "gateway.controlUi.dangerouslyDisableDeviceAuth=true disables device identity checks for the Control UI.",
-      remediation: "Disable it unless you are in a short-lived break-glass scenario.",
+        "gateway.controlUi.dangerouslyDisableDeviceAuth=true disables device identity checks for ALL Control UI origins. " +
+        "This flag is deprecated — use per-origin tokenOnlyAuth in allowedOrigins instead.",
+      remediation:
+        'Remove dangerouslyDisableDeviceAuth and add tokenOnlyAuth per-origin: { origin: "https://example.com", tokenOnlyAuth: true }.',
     });
   }
 
-  if (isFeishuDocToolEnabled(cfg)) {
+  // Check for per-origin tokenOnlyAuth entries.
+  const tokenOnlyAuthOrigins = (cfg.gateway?.controlUi?.allowedOrigins ?? [])
+    .filter(
+      (entry): entry is { origin: string; tokenOnlyAuth?: boolean } =>
+        typeof entry === "object" && entry.tokenOnlyAuth === true,
+    )
+    .map((entry) => entry.origin);
+  if (tokenOnlyAuthOrigins.length > 0) {
     findings.push({
-      checkId: "channels.feishu.doc_owner_open_id",
+      checkId: "gateway.control_ui.per_origin_token_only_auth",
       severity: "warn",
-      title: "Feishu doc create can grant requester permissions",
+      title: "Control UI per-origin token-only auth enabled",
       detail:
-        'channels.feishu tools include "doc"; feishu_doc action "create" can grant document access to the trusted requesting Feishu user.',
+        `${tokenOnlyAuthOrigins.length} origin(s) have tokenOnlyAuth enabled: ${tokenOnlyAuthOrigins.join(", ")}. ` +
+        "These origins skip device identity checks and rely on token/password auth only.",
       remediation:
-        "Disable channels.feishu.tools.doc when not needed, and restrict tool access for untrusted prompts.",
+        "Only use tokenOnlyAuth for trusted origins on private networks where device identity is unavailable.",
     });
   }
 
@@ -1036,7 +983,6 @@ export async function runSecurityAudit(opts: SecurityAuditOptions): Promise<Secu
       : null;
 
   if (opts.includeFilesystem !== false) {
-    const codeSafetySummaryCache = new Map<string, Promise<unknown>>();
     findings.push(
       ...(await collectFilesystemFindings({
         stateDir,
@@ -1061,19 +1007,8 @@ export async function runSecurityAudit(opts: SecurityAuditOptions): Promise<Secu
     );
     findings.push(...(await collectPluginsTrustFindings({ cfg, stateDir })));
     if (opts.deep === true) {
-      findings.push(
-        ...(await collectPluginsCodeSafetyFindings({
-          stateDir,
-          summaryCache: codeSafetySummaryCache,
-        })),
-      );
-      findings.push(
-        ...(await collectInstalledSkillsCodeSafetyFindings({
-          cfg,
-          stateDir,
-          summaryCache: codeSafetySummaryCache,
-        })),
-      );
+      findings.push(...(await collectPluginsCodeSafetyFindings({ stateDir })));
+      findings.push(...(await collectInstalledSkillsCodeSafetyFindings({ cfg, stateDir })));
     }
   }
 

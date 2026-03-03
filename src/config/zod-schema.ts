@@ -179,7 +179,6 @@ export const OpenClawSchema = z
       .object({
         enabled: z.boolean().optional(),
         flags: z.array(z.string()).optional(),
-        stuckSessionWarnMs: z.number().int().positive().optional(),
         otel: z
           .object({
             enabled: z.boolean().optional(),
@@ -250,7 +249,6 @@ export const OpenClawSchema = z
         headless: z.boolean().optional(),
         noSandbox: z.boolean().optional(),
         attachOnly: z.boolean().optional(),
-        cdpPortRangeStart: z.number().int().min(1).max(65535).optional(),
         defaultProfile: z.string().optional(),
         snapshotDefaults: BrowserSnapshotDefaultsSchema,
         ssrfPolicy: z
@@ -272,7 +270,6 @@ export const OpenClawSchema = z
                 cdpPort: z.number().int().min(1).max(65535).optional(),
                 cdpUrl: z.string().optional(),
                 driver: z.union([z.literal("clawd"), z.literal("extension")]).optional(),
-                attachOnly: z.boolean().optional(),
                 color: HexColorSchema,
               })
               .strict()
@@ -281,7 +278,6 @@ export const OpenClawSchema = z
               }),
           )
           .optional(),
-        extraArgs: z.array(z.string()).optional(),
       })
       .strict()
       .optional(),
@@ -343,19 +339,6 @@ export const OpenClawSchema = z
           .object({
             coalesceIdleMs: z.number().int().nonnegative().optional(),
             maxChunkChars: z.number().int().positive().optional(),
-            repeatSuppression: z.boolean().optional(),
-            deliveryMode: z.union([z.literal("live"), z.literal("final_only")]).optional(),
-            hiddenBoundarySeparator: z
-              .union([
-                z.literal("none"),
-                z.literal("space"),
-                z.literal("newline"),
-                z.literal("paragraph"),
-              ])
-              .optional(),
-            maxOutputChars: z.number().int().positive().optional(),
-            maxSessionUpdateChars: z.number().int().positive().optional(),
-            tagVisibility: z.record(z.string(), z.boolean()).optional(),
           })
           .strict()
           .optional(),
@@ -391,17 +374,6 @@ export const OpenClawSchema = z
         enabled: z.boolean().optional(),
         store: z.string().optional(),
         maxConcurrentRuns: z.number().int().positive().optional(),
-        retry: z
-          .object({
-            maxAttempts: z.number().int().min(0).max(10).optional(),
-            backoffMs: z.array(z.number().int().nonnegative()).min(1).max(10).optional(),
-            retryOn: z
-              .array(z.enum(["rate_limit", "network", "timeout", "server_error"]))
-              .min(1)
-              .optional(),
-          })
-          .strict()
-          .optional(),
         webhook: HttpUrlSchema.optional(),
         webhookToken: z.string().optional().register(sensitive),
         sessionRetention: z.union([z.string(), z.literal(false)]).optional(),
@@ -409,25 +381,6 @@ export const OpenClawSchema = z
           .object({
             maxBytes: z.union([z.string(), z.number()]).optional(),
             keepLines: z.number().int().positive().optional(),
-          })
-          .strict()
-          .optional(),
-        failureAlert: z
-          .object({
-            enabled: z.boolean().optional(),
-            after: z.number().int().min(1).optional(),
-            cooldownMs: z.number().int().min(0).optional(),
-            mode: z.enum(["announce", "webhook"]).optional(),
-            accountId: z.string().optional(),
-          })
-          .strict()
-          .optional(),
-        failureDestination: z
-          .object({
-            channel: z.string().optional(),
-            to: z.string().optional(),
-            accountId: z.string().optional(),
-            mode: z.enum(["announce", "webhook"]).optional(),
           })
           .strict()
           .optional(),
@@ -565,7 +518,19 @@ export const OpenClawSchema = z
             enabled: z.boolean().optional(),
             basePath: z.string().optional(),
             root: z.string().optional(),
-            allowedOrigins: z.array(z.string()).optional(),
+            allowedOrigins: z
+              .array(
+                z.union([
+                  z.string(),
+                  z
+                    .object({
+                      origin: z.string(),
+                      tokenOnlyAuth: z.boolean().optional(),
+                    })
+                    .strict(),
+                ]),
+              )
+              .optional(),
             dangerouslyAllowHostHeaderOriginFallback: z.boolean().optional(),
             allowInsecureAuth: z.boolean().optional(),
             dangerouslyDisableDeviceAuth: z.boolean().optional(),
