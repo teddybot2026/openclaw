@@ -88,12 +88,12 @@ function deriveDefaultGatewayUrl(): { pageUrl: string; effectiveUrl: string } {
   return { pageUrl, effectiveUrl };
 }
 
-function getSessionStorage(): Storage | null {
-  if (typeof window !== "undefined" && window.sessionStorage) {
-    return window.sessionStorage;
+function getTokenStorage(): Storage | null {
+  if (typeof window !== "undefined" && window.localStorage) {
+    return window.localStorage;
   }
-  if (typeof sessionStorage !== "undefined") {
-    return sessionStorage;
+  if (typeof localStorage !== "undefined") {
+    return localStorage;
   }
   return null;
 }
@@ -158,7 +158,7 @@ function resolveScopedSessionSelection(
 
 function loadSessionToken(gatewayUrl: string): string {
   try {
-    const storage = getSessionStorage();
+    const storage = getTokenStorage();
     if (!storage) {
       return "";
     }
@@ -172,7 +172,7 @@ function loadSessionToken(gatewayUrl: string): string {
 
 function persistSessionToken(gatewayUrl: string, token: string) {
   try {
-    const storage = getSessionStorage();
+    const storage = getTokenStorage();
     if (!storage) {
       return;
     }
