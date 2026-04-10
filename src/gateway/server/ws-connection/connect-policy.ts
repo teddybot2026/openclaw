@@ -87,11 +87,21 @@ export function shouldClearUnboundScopesForMissingDeviceIdentity(params: {
   preserveInsecureLocalControlUiScopes: boolean;
   authMethod: string | undefined;
   trustedProxyAuthOk?: boolean;
+  sharedAuthOk?: boolean;
 }): boolean {
+  // Shared token/password auth that passes authentication should keep its
+  // declared operator scopes — the client proved identity via the shared secret.
+  // Trusted-proxy auth is excluded: those scopes remain unbound without device
+  // identity (see #57692).
+  const preserveSharedTokenScopes =
+    params.sharedAuthOk === true &&
+    params.authMethod !== "trusted-proxy" &&
+    params.trustedProxyAuthOk !== true;
   return (
     params.decision.kind !== "allow" ||
     (!params.controlUiAuthPolicy.allowBypass &&
       !params.preserveInsecureLocalControlUiScopes &&
+      !preserveSharedTokenScopes &&
       // trusted-proxy auth can bypass pairing for some clients, but those
       // self-declared scopes are still unbound without device identity.
       (params.authMethod === "token" ||

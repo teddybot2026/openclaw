@@ -369,4 +369,61 @@ describe("ws connect policy", () => {
       }),
     ).toBe(true);
   });
+
+  test("preserves scopes for shared token/password auth without device identity", () => {
+    // Regression: scopes were cleared for headless/API operator clients (e.g. dashboard API)
+    // authenticating with a shared token even when sharedAuthOk=true. Fix: restore the
+    // !sharedAuthOk guard lost in the 8b88b927 refactor.
+    const nonControlUi = resolveControlUiAuthPolicy({
+      isControlUi: false,
+      controlUiConfig: undefined,
+      deviceRaw: null,
+    });
+
+    // Token auth with sharedAuthOk=true: scopes must be preserved.
+    expect(
+      shouldClearUnboundScopesForMissingDeviceIdentity({
+        decision: { kind: "allow" },
+        controlUiAuthPolicy: nonControlUi,
+        preserveInsecureLocalControlUiScopes: false,
+        authMethod: "token",
+        sharedAuthOk: true,
+      }),
+    ).toBe(false);
+
+    // Password auth with sharedAuthOk=true: scopes must be preserved.
+    expect(
+      shouldClearUnboundScopesForMissingDeviceIdentity({
+        decision: { kind: "allow" },
+        controlUiAuthPolicy: nonControlUi,
+        preserveInsecureLocalControlUiScopes: false,
+        authMethod: "password",
+        sharedAuthOk: true,
+      }),
+    ).toBe(false);
+
+    // trusted-proxy auth: scopes must still be cleared even when sharedAuthOk=true
+    // (#57692 intentionally keeps trusted-proxy scopes unbound).
+    expect(
+      shouldClearUnboundScopesForMissingDeviceIdentity({
+        decision: { kind: "allow" },
+        controlUiAuthPolicy: nonControlUi,
+        preserveInsecureLocalControlUiScopes: false,
+        authMethod: "trusted-proxy",
+        sharedAuthOk: true,
+        trustedProxyAuthOk: true,
+      }),
+    ).toBe(true);
+
+    // Token auth with sharedAuthOk=false (auth failed): scopes must still be cleared.
+    expect(
+      shouldClearUnboundScopesForMissingDeviceIdentity({
+        decision: { kind: "allow" },
+        controlUiAuthPolicy: nonControlUi,
+        preserveInsecureLocalControlUiScopes: false,
+        authMethod: "token",
+        sharedAuthOk: false,
+      }),
+    ).toBe(true);
+  });
 });
